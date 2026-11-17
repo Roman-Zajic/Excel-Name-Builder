@@ -1,0 +1,153 @@
+Option Explicit
+
+Public Sub BuildSimpleRanges()
+    Dim wb As Workbook
+    Dim cfgSheet As Worksheet, targetSheet As Worksheet
+    Dim lastRow As Long, r As Long
+    Dim sheetKey As String, rngName As String, expr As String
+    Dim finalRange As Range
+    
+    If ActiveWorkbook Is Nothing Then Exit Sub
+    Set wb = ActiveWorkbook
+    Set cfgSheet = ThisWorkbook.Worksheets("Settings")
+    
+    lastRow = cfgSheet.Cells(cfgSheet.Rows.Count, "A").End(xlUp).Row
+    
+    For r = 2 To lastRow
+        sheetKey = Trim(CStr(cfgSheet.Cells(r, "A").Value))
+        rngName = Trim(CStr(cfgSheet.Cells(r, "B").Value))
+        expr = Trim(CStr(cfgSheet.Cells(r, "C").Value))
+        
+        If sheetKey <> "" And rngName <> "" And expr <> "" Then
+            Set targetSheet = FindSheet(wb, sheetKey)
+            
+            ' Only process if a matching sheet exists in the active workbook
+            If Not targetSheet Is Nothing Then
+                Set finalRange = ParseRange(targetSheet, expr)
+                
+                If Not finalRange Is Nothing Then
+                    On Error Resume Next
+                    wb.Names(rngName).Delete
+                    On Error GoTo 0
+                    
+                    wb.Names.Add Name:=rngName, RefersTo:=finalRange
+                    Debug.Print rngName & " -> " & targetSheet.Name & "!" & finalRange.Address
+                Else
+                    MsgBox "Could not find range for: " & rngName & " (Sheet: " & targetSheet.Name & ")", vbExclamation
+                End If
+            End If
+        End If
+    Next r
+    
+    MsgBox "Done!", vbInformation
+End Sub
+
+' Finds sheet matching "name" or "<number>. name" (avoids "data" matching "extended data")
+Private Function FindSheet(ByVal wb As Workbook, ByVal targetName As String) As Worksheet
+    Dim ws As Worksheet
+    Dim cleanName As String
+    Dim dotPos As Long
+    
+    targetName = LCase(Trim(targetName))
+    
+    For Each ws In wb.Worksheets
+        cleanName = LCase(Trim(ws.Name))
+        dotPos = InStr(cleanName, ".")
+        
+        ' Strip leading numeric prefix like "1. " or "12."
+        If dotPos > 1 Then
+            If IsNumeric(Left(cleanName, dotPos - 1)) Then
+                cleanName = Trim(Mid(cleanName, dotPos + 1))
+            End If
+        End If
+        
+        If cleanName = targetName Then
+            Set FindSheet = ws
+            Exit Function
+        End If
+    Next ws
+End Function
+
+' Splits "Start .. End" or evaluates a single chain
+Private Function ParseRange(ByVal ws As Worksheet, ByVal expr As String) As Range
+    Dim bounds() As String
+    Dim rStart As Range, rEnd As Range
+    
+    If InStr(expr, "..") > 0 Then
+        bounds = Split(expr, "..", 2)
+        Set rStart = EvalChain(ws, Trim(bounds(0)))
+        Set rEnd = EvalChain(ws, Trim(bounds(1)))
+        If Not rStart Is Nothing And Not rEnd Is Nothing Then
+            Set ParseRange = ws.Range(rStart, rEnd)
+        End If
+    Else
+        Set ParseRange = EvalChain(ws, expr)
+    End If
+End Function
+
+' Evaluates Anchor + .step1.step2...
+Private Function EvalChain(ByVal ws As Worksheet, ByVal chain As String) As Range
+    Dim steps() As String
+    Dim rng As Range
+    Dim i As Long, stepStr As String, arg As String, nums() As String
+    
+    steps = Split(chain, ".")
+    
+    ' Step 0: Starting Anchor (A1, row(1), column(A), column(1))
+    stepStr = Trim(steps(0))
+    If LCase(stepStr) Like "row(*)" Then
+        arg = Trim(Mid(stepStr, 5, Len(stepStr) - 5))
+        Set rng = ws.Rows(CLng(arg))
+    ElseIf LCase(stepStr) Like "column(*)" Then
+        arg = Mid(stepStr, 8, Len(stepStr) - 8)
+        arg = Replace(arg, """", "")
+        arg = Replace(arg, "'", "")
+        arg = Replace(arg, ChrW(8220), "")
+        arg = Replace(arg, ChrW(8221), "")
+        arg = Trim(arg)
+        
+        If IsNumeric(arg) Then
+            Set rng = ws.Columns(CLng(arg))
+        Else
+            Set rng = ws.Columns(arg)
+        End If
+    Else
+        Set rng = ws.Range(stepStr)
+    End If
+    
+    ' Steps 1+: Apply modifiers
+    For i = 1 To UBound(steps)
+        If rng Is Nothing Then Exit Function
+        stepStr = Trim(steps(i))
+        
+        Select Case True
+            Case LCase(stepStr) Like "down*"
+                Set rng = rng.End(xlDown)
+            Case LCase(stepStr) Like "up*"
+                Set rng = rng.End(xlUp)
+            Case LCase(stepStr) Like "left*"
+                Set rng = rng.End(xlToLeft)
+            Case LCase(stepStr) Like "right*"
+                Set rng = rng.End(xlToRight)
+            Case LCase(stepStr) Like "find(*)"
+                arg = Replace(Mid(stepStr, 6, Len(stepStr) - 6), """", "")
+                Set rng = rng.Find(What:=arg, _
+                                   After:=rng.Cells(rng.Cells.Count), _
+                                   LookIn:=xlValues, _
+                                   LookAt:=xlPart, _
+                                   MatchCase:=False)
+            Case LCase(stepStr) Like "offset(*)"
+                arg = Mid(stepStr, 8, Len(stepStr) - 8)
+                nums = Split(arg, ",")
+                Set rng = rng.Offset(CLng(nums(0)), CLng(nums(1)))
+            Case LCase(stepStr) Like "resize(*)"
+                arg = Mid(stepStr, 8, Len(stepStr) - 8)
+                nums = Split(arg, ",")
+                Set rng = rng.Resize(CLng(nums(0)), CLng(nums(1)))
+            Case Else
+                Exit Function
+        End Select
+    Next i
+    
+    Set EvalChain = rng
+End Function
